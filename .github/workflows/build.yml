@@ -1,0 +1,74 @@
+name: Build archive_nintendo
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: devkitpro/devkita64:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Находит проект где бы он ни лежал: распаковывает любой .zip из репозитория,
+      # понимает вложенную папку и «плоскую» загрузку без папки source
+      - name: Найти и подготовить проект
+        shell: bash
+        run: |
+          set -e
+          cd "$GITHUB_WORKSPACE"
+          find_mk() { find . -maxdepth 4 -name Makefile -not -path './.git/*' -not -path '*/build/*' | head -1; }
+          mk=$(find_mk)
+          if [ -z "$mk" ]; then
+            if [ -n "$(find . -maxdepth 3 -name '*.zip' -not -path './.git/*' | head -1)" ]; then
+              command -v unzip >/dev/null || (apt-get update -qq && apt-get install -y -qq unzip)
+              find . -maxdepth 3 -name '*.zip' -not -path './.git/*' | while read -r z; do
+                echo "Распаковываю $z"
+                unzip -o -q "$z" -d "$(dirname "$z")"
+              done
+            fi
+            mk=$(find_mk)
+          fi
+          if [ -z "$mk" ]; then
+            echo "::error::Makefile не найден. Загрузите в репозиторий архив archive_nintendo.zip целиком (любое имя .zip) или распакованные файлы с папками."
+            find . -not -path './.git/*' | head -60
+            exit 1
+          fi
+          dir=$(cd "$(dirname "$mk")" && pwd)
+          # Если файлы загрузили «плоско» (без папки source) — раскладываем сами
+          if [ ! -d "$dir/source" ] && ls "$dir"/*.cpp >/dev/null 2>&1; then
+            echo "Папки source нет, раскладываю файлы"
+            mkdir -p "$dir/source"
+            mv "$dir"/*.cpp "$dir"/*.hpp "$dir"/*.h "$dir/source/" 2>/dev/null || true
+          fi
+          if [ ! -d "$dir/source" ] || [ ! -f "$dir/icon.jpg" ]; then
+            echo "::error::В $dir нет папки source или icon.jpg — архив загружен не полностью."
+            ls -la "$dir"
+            exit 1
+          fi
+          echo "Проект найден: $dir"
+          echo "PROJECT_DIR=$dir" >> "$GITHUB_ENV"
+
+      - name: Установить zlib для Switch
+        run: |
+          (dkp-pacman -Sy --noconfirm switch-zlib || pacman -Sy --noconfirm switch-zlib)
+
+      - name: Собрать .nro
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          make -j2
+
+      - name: Собрать папку для SD-карты
+        shell: bash
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/out/switch/archive_nintendo" "$GITHUB_WORKSPACE/out/archive_nintendo/torrents"
+          cp "$PROJECT_DIR/archive_nintendo.nro" "$GITHUB_WORKSPACE/out/switch/archive_nintendo/"
+          echo "Кладите сюда файлы .torrent" > "$GITHUB_WORKSPACE/out/archive_nintendo/torrents/README.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: archive_nintendo
+          path: out/
+          if-no-files-found: error
